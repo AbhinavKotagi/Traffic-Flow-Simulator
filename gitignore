@@ -1,0 +1,39 @@
+# ============================================================
+#  .gitignore — Traffic Policy Simulator
+# ============================================================
+
+# Secret keys — NEVER commit this
+.env
+
+# ML model artifacts (large binary files)
+*.pkl
+*.joblib
+
+# Generated datasets (can be rebuilt)
+dataset.csv
+road_knowledge.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDEs
+.vscode/
+.idea/
+
+# Streamlit cache
+.streamlit/
