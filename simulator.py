@@ -1,193 +1,193 @@
 """
 ============================================================
- PART 3 — POLICY SIMULATION ENGINE
+  PART 4 — POLICY SIMULATION ENGINE
+  Traffic Policy Simulator | simulator.py
 ============================================================
-Defines and applies the 3 traffic policies.
-Core function: simulate_policy(data, policy_name, model, scaler)
+Implements the 3 traffic policies and predicts:
+  • CongestionScore reduction
+  • Speed improvement estimate
 
 Policies:
-  1. one_way          — One-Way Road Policy
-  2. no_parking       — No-Parking Enforcement
-  3. peak_restriction — Peak-Hour Vehicle Restriction
+  "one_way"          — One-Way Road
+  "no_parking"       — No-Parking Enforcement
+  "peak_restriction" — Peak-Hour Vehicle Restriction
 
-Usage (standalone test):
-    python simulator.py
+Usage (standalone):
+  python simulator.py
 ============================================================
 """
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from typing import Dict, Tuple
 
-# ── Policy definitions ────────────────────────────────────
-# Each policy maps feature names to multipliers applied to
-# the baseline values before ML prediction.
+from train_model import FEATURE_COLS, predict_congestion
 
+# ─────────────────────────────────────────────────────────
+#  POLICY REGISTRY
+# ─────────────────────────────────────────────────────────
 POLICIES: Dict[str, Dict] = {
     "one_way": {
         "label"      : "One-Way Road Policy",
-        "description": "Restricts traffic to one direction, reducing vehicle volume and stopping.",
-        "modifiers"  : {
+        "short"      : "OneWay",
+        "icon"       : "↔️→",
+        "description": (
+            "Converts a bidirectional road to one-way traffic flow. "
+            "Reduces overall vehicle volume and minimises stopping conflicts."
+        ),
+        "modifiers": {
             "VehicleCount": 0.85,
-            "WrongParked" : 1.00,   # no direct effect
             "Stopped"     : 0.60,
+            "WrongParked" : 1.00,
+            "EstSpeed"    : 1.25,   # speed improves due to fewer conflicts
         },
         "color": "#2196F3",
+        "accent": "#64B5F6",
     },
     "no_parking": {
         "label"      : "No-Parking Enforcement",
-        "description": "Clears illegally parked vehicles and reduces lane blockages.",
-        "modifiers"  : {
+        "short"      : "NoParking",
+        "icon"       : "🚫🅿",
+        "description": (
+            "Strictly enforces no-parking zones, clearing illegally parked "
+            "vehicles and reducing lane blockages."
+        ),
+        "modifiers": {
             "VehicleCount": 1.00,
-            "WrongParked" : 0.00,   # cleared entirely
             "Stopped"     : 0.70,
+            "WrongParked" : 0.00,   # eliminated entirely
+            "EstSpeed"    : 1.15,
         },
         "color": "#FF9800",
+        "accent": "#FFB74D",
     },
     "peak_restriction": {
         "label"      : "Peak-Hour Vehicle Restriction",
-        "description": "Limits vehicle entry during peak hours using odd/even or permit rules.",
-        "modifiers"  : {
+        "short"      : "PeakRestriction",
+        "icon"       : "⏰🚗",
+        "description": (
+            "Restricts vehicle entry during peak hours using permit or "
+            "odd/even number plate rules, reducing overall traffic volume."
+        ),
+        "modifiers": {
             "VehicleCount": 0.70,
-            "WrongParked" : 1.00,
             "Stopped"     : 0.80,
+            "WrongParked" : 0.90,
+            "EstSpeed"    : 1.20,
         },
         "color": "#9C27B0",
+        "accent": "#CE93D8",
     },
 }
 
 
-def apply_policy_modifiers(
-    vehicle_count: float,
-    wrong_parked:  float,
-    stopped:       float,
-    policy_key:    str,
-) -> Tuple[float, float, float]:
-    """
-    Apply policy multipliers to raw feature values.
-
-    Parameters
-    ----------
-    vehicle_count, wrong_parked, stopped : baseline feature values
-    policy_key : one of 'one_way', 'no_parking', 'peak_restriction'
-
-    Returns
-    -------
-    Tuple of (modified_vehicle_count, modified_wrong_parked, modified_stopped)
-    """
-    if policy_key not in POLICIES:
-        raise ValueError(f"Unknown policy '{policy_key}'. Choose from: {list(POLICIES.keys())}")
-
-    mods = POLICIES[policy_key]["modifiers"]
-    return (
-        max(0, vehicle_count * mods["VehicleCount"]),
-        max(0, wrong_parked  * mods["WrongParked"]),
-        max(0, stopped       * mods["Stopped"]),
-    )
-
-
-def compute_congestion_score(vehicle_count: float, wrong_parked: float, stopped: float) -> float:
-    """
-    Compute CongestionScore using the defined formula.
-        CongestionScore = 0.5×VehicleCount + 2×WrongParked + 2×Stopped
-    """
-    return (0.5 * vehicle_count) + (2 * wrong_parked) + (2 * stopped)
-
-
+# ─────────────────────────────────────────────────────────
+#  CORE SIMULATION FUNCTION
+# ─────────────────────────────────────────────────────────
 def simulate_policy(
-    vehicle_count: float,
-    wrong_parked:  float,
-    stopped:       float,
-    policy_key:    str,
+    features: dict,
+    policy_key: str,
     model=None,
     scaler=None,
-) -> Dict:
+) -> dict:
     """
-    Main simulation function.
+    Apply a traffic policy to the given feature set and predict outcomes.
 
-    Applies policy modifiers to inputs, predicts congestion
-    using ML model (or formula fallback), and returns
-    a full result dictionary.
+    Workflow:
+      1. Compute baseline CongestionScore (formula or ML model)
+      2. Apply policy multipliers to features
+      3. Compute post-policy CongestionScore
+      4. Estimate speed improvement
+      5. Return full result dictionary
 
     Parameters
     ----------
-    vehicle_count : baseline vehicle count
-    wrong_parked  : baseline wrong-parked vehicles
-    stopped       : baseline stopped vehicles
-    policy_key    : policy identifier string
-    model         : trained RandomForestRegressor (optional)
-    scaler        : fitted StandardScaler (optional)
+    features   : dict  Input traffic features (VehicleCount, Stopped, etc.)
+    policy_key : str   Key from POLICIES dict
+    model      : trained RandomForestRegressor (optional; formula used if None)
+    scaler     : fitted StandardScaler (optional)
 
     Returns
     -------
-    dict with keys:
-        policy_key, policy_label,
-        baseline_score, modified_score,
-        reduction_pct, modified_features, inputs
+    dict with keys: policy_key, policy_label, inputs, modified_features,
+                    baseline_score, modified_score, reduction_pct,
+                    baseline_speed, modified_speed, speed_improvement_pct
     """
-    # ── Baseline score ────────────────────────────────────
-    baseline_score = compute_congestion_score(vehicle_count, wrong_parked, stopped)
+    if policy_key not in POLICIES:
+        raise ValueError(f"Unknown policy '{policy_key}'. Choose: {list(POLICIES.keys())}")
 
-    # Optionally use ML model for baseline
-    if model is not None and scaler is not None:
-        X_base         = np.array([[vehicle_count, wrong_parked, stopped]])
-        X_base_scaled  = scaler.transform(X_base)
-        baseline_score = float(model.predict(X_base_scaled)[0])
+    policy  = POLICIES[policy_key]
+    mods    = policy["modifiers"]
 
-    # ── Apply policy ──────────────────────────────────────
-    mod_vc, mod_wp, mod_st = apply_policy_modifiers(
-        vehicle_count, wrong_parked, stopped, policy_key
-    )
+    # ── Ensure VehicleMix is present ──────────────────────
+    features = _ensure_vehicle_mix(features)
 
-    # ── Modified score ────────────────────────────────────
-    modified_score = compute_congestion_score(mod_vc, mod_wp, mod_st)
+    # ── Baseline ──────────────────────────────────────────
+    baseline_score = _compute_score(features, model, scaler)
+    baseline_speed = float(features.get("EstSpeed", 25))
 
-    if model is not None and scaler is not None:
-        X_mod         = np.array([[mod_vc, mod_wp, mod_st]])
-        X_mod_scaled  = scaler.transform(X_mod)
-        modified_score = float(model.predict(X_mod_scaled)[0])
+    # ── Apply policy modifiers ─────────────────────────────
+    modified = dict(features)
+    for feat, mult in mods.items():
+        if feat in modified:
+            modified[feat] = max(0.0, modified[feat] * mult)
 
-    # ── Reduction percentage ──────────────────────────────
-    reduction_pct = ((baseline_score - modified_score) / baseline_score * 100) if baseline_score > 0 else 0
+    modified = _ensure_vehicle_mix(modified)   # recompute mix after change
+
+    # ── Post-policy prediction ─────────────────────────────
+    modified_score = _compute_score(modified, model, scaler)
+    modified_speed = min(float(modified.get("EstSpeed", baseline_speed)), 80.0)
+
+    # ── Derived KPIs ──────────────────────────────────────
+    reduction_pct      = _pct_change(baseline_score, modified_score)
+    speed_improve_pct  = _pct_change(baseline_speed, modified_speed, higher_is_better=True)
 
     return {
-        "policy_key"      : policy_key,
-        "policy_label"    : POLICIES[policy_key]["label"],
-        "inputs"          : {
-            "VehicleCount": vehicle_count,
-            "WrongParked" : wrong_parked,
-            "Stopped"     : stopped,
+        "policy_key"          : policy_key,
+        "policy_label"        : policy["label"],
+        "policy_short"        : policy["short"],
+        "policy_icon"         : policy["icon"],
+        "policy_color"        : policy["color"],
+        "inputs"              : dict(features),
+        "modified_features"   : {
+            k: round(v, 2) for k, v in modified.items()
+            if k in ("VehicleCount", "Stopped", "WrongParked", "EstSpeed", "VehicleMix")
         },
-        "modified_features": {
-            "VehicleCount": round(mod_vc, 2),
-            "WrongParked" : round(mod_wp, 2),
-            "Stopped"     : round(mod_st, 2),
-        },
-        "baseline_score"  : round(baseline_score, 2),
-        "modified_score"  : round(modified_score, 2),
-        "reduction_pct"   : round(reduction_pct, 2),
+        "baseline_score"      : round(baseline_score,     2),
+        "modified_score"      : round(modified_score,     2),
+        "reduction_pct"       : round(reduction_pct,      2),
+        "baseline_speed"      : round(baseline_speed,     1),
+        "modified_speed"      : round(modified_speed,     1),
+        "speed_improvement_pct": round(speed_improve_pct, 2),
     }
 
 
+# ─────────────────────────────────────────────────────────
+#  TREND SIMULATION
+# ─────────────────────────────────────────────────────────
 def simulate_trend(
-    wrong_parked: float,
-    stopped:      float,
-    policy_key:   str,
+    base_features: dict,
+    policy_key: str,
     model=None,
     scaler=None,
-    vc_range=(5, 60),
-    steps=30,
+    vc_range: Tuple[int, int] = (5, 80),
+    steps: int = 35,
 ) -> pd.DataFrame:
     """
-    Simulate congestion vs vehicle count for a trend graph.
+    Sweep VehicleCount across a range and compute congestion scores
+    for baseline and after-policy — used for the Trend Graph.
 
-    Returns DataFrame with columns:
-        VehicleCount, Baseline, AfterPolicy
+    Returns DataFrame: VehicleCount | Baseline | AfterPolicy
     """
     vc_values = np.linspace(vc_range[0], vc_range[1], steps)
     rows = []
     for vc in vc_values:
-        result = simulate_policy(vc, wrong_parked, stopped, policy_key, model, scaler)
+        feats = dict(base_features)
+        feats["VehicleCount"] = vc
+        feats["Density"]      = vc / max(feats.get("Lanes", 2), 1)
+        feats = _ensure_vehicle_mix(feats)
+
+        result = simulate_policy(feats, policy_key, model, scaler)
         rows.append({
             "VehicleCount": round(vc, 1),
             "Baseline"    : result["baseline_score"],
@@ -196,31 +196,74 @@ def simulate_trend(
     return pd.DataFrame(rows)
 
 
-def format_result_summary(result: Dict) -> str:
-    """Return a formatted single-line summary of simulation result."""
+# ─────────────────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────────────────
+def _ensure_vehicle_mix(features: dict) -> dict:
+    """Add VehicleMix key if absent (needed by ML model)."""
+    f = dict(features)
+    if "VehicleMix" not in f:
+        f["VehicleMix"] = f.get("BikeRatio", 0.2) + f.get("BusRatio", 0.1) + f.get("TruckRatio", 0.05)
+    return f
+
+
+def _compute_score(features: dict, model, scaler) -> float:
+    """Use ML model if available, else formula."""
+    if model is not None and scaler is not None:
+        try:
+            return predict_congestion(features, model, scaler)
+        except Exception:
+            pass
+    # Fallback formula
+    vc  = features.get("VehicleCount", 0)
+    st  = features.get("Stopped",      0)
+    return (0.5 * vc) + (2 * st)
+
+
+def _pct_change(before: float, after: float, higher_is_better: bool = False) -> float:
+    """Percentage change. Positive = improvement (reduction in congestion / increase in speed)."""
+    if before == 0:
+        return 0.0
+    raw = (before - after) / before * 100
+    return raw if not higher_is_better else -raw
+
+
+def format_result(result: dict) -> str:
+    """Human-readable one-liner output."""
     return (
-        f"Policy: {result['policy_label']} | "
-        f"Before: {result['baseline_score']:.1f} | "
-        f"After: {result['modified_score']:.1f} | "
-        f"Congestion Reduced: {result['reduction_pct']:.1f}%"
+        f"Policy: {result['policy_short']} | "
+        f"Congestion Reduced: {result['reduction_pct']:.1f}% | "
+        f"Speed Improved: {result['speed_improvement_pct']:.1f}%"
     )
 
 
-# ── Standalone test ───────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+#  STANDALONE TEST
+# ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("        TRAFFIC POLICY SIMULATION TEST")
-    print("="*60)
+    sample = {
+        "VehicleCount": 45,
+        "Stopped"     : 8,
+        "WrongParked" : 4,
+        "EstSpeed"    : 22,
+        "Lanes"       : 4,
+        "Density"     : 11.25,
+        "BikeRatio"   : 0.25,
+        "BusRatio"    : 0.12,
+        "TruckRatio"  : 0.08,
+        "Pedestrians" : 6,
+    }
 
-    # Test all 3 policies with sample inputs
-    sample = dict(vehicle_count=35, wrong_parked=4, stopped=6)
+    print("\n" + "═"*60)
+    print("         POLICY SIMULATION — STANDALONE TEST")
+    print("═"*60)
 
-    for key in POLICIES:
-        result = simulate_policy(**sample, policy_key=key)
-        print(f"\n  {result['policy_label']}")
-        print(f"  Baseline Score  : {result['baseline_score']}")
-        print(f"  After Policy    : {result['modified_score']}")
-        print(f"  Reduction       : {result['reduction_pct']}%")
-        print(f"  Modified Inputs : {result['modified_features']}")
+    for pk in POLICIES:
+        res = simulate_policy(sample, pk)
+        print(f"\n  {res['policy_icon']}  {res['policy_label']}")
+        print(f"     Baseline Score  : {res['baseline_score']}")
+        print(f"     After Policy    : {res['modified_score']}")
+        print(f"     Congestion ↓    : {res['reduction_pct']}%")
+        print(f"     Speed ↑         : {res['speed_improvement_pct']}%")
 
-    print("\n" + "="*60 + "\n")
+    print("\n" + "═"*60 + "\n")
