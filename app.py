@@ -468,36 +468,64 @@ with st.sidebar:
     pedestrians = st.slider("Pedestrian & Cyclist Count", 50, 250,
                             int(loc_stats.get("PedestrianCount", 110)), 5)
 
-    st.markdown('<div class="sb-section">📋 Policy</div>', unsafe_allow_html=True)
-    selected_policy = st.selectbox(
-        "Select Policy to Simulate",
+    st.markdown('<div class="sb-section">📋 Policy Selection</div>', unsafe_allow_html=True)
+    st.caption("Select one or more policies to simulate together.")
+    selected_policies = st.multiselect(
+        "Policies to Simulate",
         list(POLICIES.keys()),
+        default=["signal_opt"],
         format_func=lambda k: f"{POLICIES[k]['icon']}  {POLICIES[k]['label']}",
-        key="selected_policy"
+        key="selected_policies",
     )
-    st.markdown(
-        f"<div style='font-size:0.7rem;font-family:JetBrains Mono;color:#8b92a8;"
-        f"background:#0f1117;border:1px solid #252a3a;border-radius:5px;"
-        f"padding:0.5rem 0.7rem;margin-top:0.3rem;'>"
-        f"{POLICIES[selected_policy]['description']}</div>",
-        unsafe_allow_html=True
+
+    # Show description cards for each selected policy
+    if selected_policies:
+        for pk in selected_policies:
+            p = POLICIES[pk]
+            p_color = p['color']
+            p_icon = p['icon']
+            p_label = p['label']
+            p_desc = p['description']
+            st.markdown(
+                f"<div style='font-size:0.68rem;font-family:JetBrains Mono;color:#8b92a8;"
+                f"background:#0f1117;border:1px solid #252a3a;"
+                f"border-left:3px solid {p_color};border-radius:5px;"
+                f"padding:0.45rem 0.7rem;margin-top:0.3rem;'>"
+                f"<b style='color:{p_color};'>{p_icon} {p_label}</b><br>"
+                f"{p_desc}</div>",
+                unsafe_allow_html=True
+            )
+    else:
+        st.warning("Select at least one policy.")
+
+    is_multi = len(selected_policies) > 1
+    btn_label = (
+        f"▶  Simulate {len(selected_policies)} Policies Combined"
+        if is_multi else
+        f"▶  Run Simulation"
     )
 
     st.markdown('<div class="sb-section">▶ Simulate</div>', unsafe_allow_html=True)
-    simulate_btn = st.button("▶  Run Simulation", type="primary",
-                             use_container_width=True)
+    simulate_btn = st.button(
+        btn_label, type="primary",
+        use_container_width=True,
+        disabled=len(selected_policies) == 0,
+    )
 
     # History
     if st.session_state.history:
         st.markdown('<div class="sb-section">📂 History</div>', unsafe_allow_html=True)
         st.caption(f"{len(st.session_state.history)} run(s)")
         for i, h in enumerate(reversed(st.session_state.history[-4:])):
-            r = h["result"]
+            icons  = " + ".join(POLICIES[k]["icon"] for k in h["policies"])
+            labels = " + ".join(POLICIES[k]["label"][:12] for k in h["policies"])
+            red    = h["reduction_pct"]
+            color  = "#34d399" if red > 0 else "#f87171"
             st.markdown(f"""<div style="background:#161921;border:1px solid #252a3a;
                 border-radius:5px;padding:0.45rem 0.7rem;font-size:0.72rem;
                 font-family:'JetBrains Mono';color:#8b92a8;margin-bottom:0.3rem;">
-                {r['policy_icon']} {h['road']} · {h['timestamp']}<br>
-                <span style="color:#34d399;">▼{r['reduction_pct']:.1f}% · {r['policy_label']}</span>
+                {icons} {h['road']} · {h['timestamp']}<br>
+                <span style='color:{color};'>▼{red:.1f}% · {labels}</span>
             </div>""", unsafe_allow_html=True)
         if st.button("🗑 Clear", use_container_width=True):
             st.session_state.history = []
@@ -663,55 +691,110 @@ ci4.markdown(f"""<div class="kpi-card">
 st.markdown('<div class="sec-header">04 — POLICY SIMULATION</div>', unsafe_allow_html=True)
 
 if not simulate_btn and not st.session_state.last_results:
-    st.info("👈 Select a policy in the sidebar and click **▶ Run Simulation**.")
+    st.info("👈 Select one or more policies in the sidebar and click **▶ Run Simulation**.")
 else:
-    if simulate_btn:
-        with st.spinner(f"Simulating {POLICIES[selected_policy]['label']} …"):
-            result = simulate_policy(features, selected_policy, model, scaler, road)
-            st.session_state.last_results = {"result": result, "policy": selected_policy}
+    if simulate_btn and selected_policies:
+        label = " + ".join(POLICIES[k]["label"] for k in selected_policies)
+        with st.spinner(f"Simulating: {label} …"):
+            # Always run each policy individually
+            individual = {
+                k: simulate_policy(features, k, model, scaler, road)
+                for k in selected_policies
+            }
+            # Run combined if more than one policy selected
+            if len(selected_policies) > 1:
+                combined = simulate_combined(features, selected_policies, model, scaler, road)
+            else:
+                combined = None
+
+            st.session_state.last_results = {
+                "individual": individual,
+                "combined"  : combined,
+                "policies"  : selected_policies,
+            }
             st.session_state.history.append({
-                "area": area, "road": road,
-                "timestamp": time.strftime("%H:%M"),
-                "result": result,
+                "area"        : area,
+                "road"        : road,
+                "timestamp"   : time.strftime("%H:%M"),
+                "policies"    : selected_policies,
+                "reduction_pct": (combined["reduction_pct"] if combined
+                                  else list(individual.values())[0]["reduction_pct"]),
             })
             st.session_state.conclusions = {}
 
-    saved       = st.session_state.last_results
-    result      = saved["result"]
-    policy_key  = saved["policy"]
-    pc          = result["policy_color"]
-    reduced     = result["reduction_pct"] > 0
-    arrow       = "▼" if reduced else "▲"
-    banner_cls  = "result-banner" if reduced else "result-banner warn"
+    saved      = st.session_state.last_results
+    individual = saved["individual"]
+    combined   = saved["combined"]
+    run_policies = saved["policies"]
+    is_multi   = len(run_policies) > 1
+
+    # ── Derive the "display" result for charts ────────────
+    # For single: use that policy result directly
+    # For multi:  build a synthetic result from combined data
+    if is_multi:
+        # Combined result for banner / KPIs
+        base_result  = list(individual.values())[0]  # for baseline values
+        disp_icons   = " + ".join(POLICIES[k]["icon"]  for k in run_policies)
+        disp_label   = " + ".join(POLICIES[k]["label"] for k in run_policies)
+        disp_red     = combined["reduction_pct"]
+        disp_spd     = combined["speed_gain_pct"]
+        disp_before  = base_result["baseline_score"]
+        disp_after   = combined["modified_score"]
+        disp_color   = "#f0c040"
+        disp_spd_before = base_result["baseline_speed"]
+        disp_spd_after  = base_result["baseline_speed"] * (1 + disp_spd / 100)
+    else:
+        r            = list(individual.values())[0]
+        disp_icons   = r["policy_icon"]
+        disp_label   = r["policy_label"]
+        disp_red     = r["reduction_pct"]
+        disp_spd     = r["speed_gain_pct"]
+        disp_before  = r["baseline_score"]
+        disp_after   = r["modified_score"]
+        disp_color   = r["policy_color"]
+        disp_spd_before = r["baseline_speed"]
+        disp_spd_after  = r["modified_speed"]
+
+    reduced    = disp_red > 0
+    arrow      = "▼" if reduced else "▲"
+    banner_cls = "result-banner" if reduced else "result-banner warn"
 
     # ── Result banner ─────────────────────────────────────
+    policy_pills = ""
+    for k in run_policies:
+        pk_color = POLICIES[k]['color']
+        pk_icon = POLICIES[k]['icon']
+        pk_label = POLICIES[k]['label']
+        policy_pills += (
+            f"<span style='background:{pk_color}22;"
+            f"border:1px solid {pk_color}55;"
+            f"color:{pk_color};border-radius:4px;"
+            f"padding:2px 8px;font-size:0.7rem;margin-right:5px;'>"
+            f"{pk_icon} {pk_label}</span>"
+        )
     st.markdown(f"""
     <div class="{banner_cls}">
+        <div style="margin-bottom:0.4rem;">{policy_pills}</div>
         <div class="result-title">
-            {result['policy_icon']} {result['policy_label']}
-            &nbsp;·&nbsp; {road}, {area}
+            {disp_icons} &nbsp; {road}, {area}
         </div>
         <div class="result-meta">
-            Congestion: <b>{result['baseline_score']:.1f}%</b> → <b>{result['modified_score']:.1f}%</b>
-            &nbsp;|&nbsp; {arrow} <b>{abs(result['reduction_pct']):.1f}%</b> change
-            &nbsp;|&nbsp; Speed ↑ <b>{result['speed_gain_pct']:.1f}%</b>
-            &nbsp;|&nbsp; Effectiveness on {road_type_label}: <b>{result['effectiveness']:.0f}%</b>
-        </div>
-        <div style="font-size:0.7rem;font-family:'JetBrains Mono';color:#475569;margin-top:0.4rem;">
-            {result['policy_description']}
+            Congestion: <b>{disp_before:.1f}%</b> → <b>{disp_after:.1f}%</b>
+            &nbsp;|&nbsp; {arrow} <b>{abs(disp_red):.1f}%</b> {'combined' if is_multi else ''} reduction
+            &nbsp;|&nbsp; Speed ↑ <b>{disp_spd:.1f}%</b>
+            &nbsp;|&nbsp; {road_type_label}
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Before vs After KPI row ───────────────────────────
+    # ── KPI row ───────────────────────────────────────────
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Congestion Before", f"{result['baseline_score']:.1f}%")
-    k2.metric("Congestion After",  f"{result['modified_score']:.1f}%",
-              delta=f"{result['reduction_pct']:.1f}% reduction",
-              delta_color="inverse")
-    k3.metric("Speed Before",  f"{result['baseline_speed']:.1f} km/h")
-    k4.metric("Speed After",   f"{result['modified_speed']:.1f} km/h",
-              delta=f"+{result['speed_gain_pct']:.1f}%")
+    k1.metric("Congestion Before", f"{disp_before:.1f}%")
+    k2.metric("Congestion After",  f"{disp_after:.1f}%",
+              delta=f"{disp_red:.1f}% reduction", delta_color="inverse")
+    k3.metric("Speed Before", f"{disp_spd_before:.1f} km/h")
+    k4.metric("Speed After",  f"{disp_spd_after:.1f} km/h",
+              delta=f"+{disp_spd:.1f}%")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -726,83 +809,224 @@ else:
         "📋 Detailed Results",
     ])
 
-    # Tab 1 — Before vs After
+    combo_cache = "_".join(run_policies)
+
+    # ── TAB 1: Before vs After ────────────────────────────
     with tab1:
         fig_ba = go.Figure()
+        # Baseline bar
         fig_ba.add_trace(go.Bar(
-            name="Before (Current)", x=["Congestion Level %"],
-            y=[result["baseline_score"]],
+            name="Current (Baseline)",
+            x=["Congestion Level (%)"],
+            y=[disp_before],
             marker_color="#f87171",
-            text=[f"{result['baseline_score']:.1f}%"],
-            textposition="outside", textfont=dict(color="#f0f2f8", size=13),
+            text=[f"{disp_before:.1f}%"],
+            textposition="outside", textfont=dict(color="#f0f2f8", size=12),
         ))
-        fig_ba.add_trace(go.Bar(
-            name=f"After — {result['policy_label']}", x=["Congestion Level %"],
-            y=[result["modified_score"]],
-            marker_color=pc,
-            text=[f"{result['modified_score']:.1f}%"],
-            textposition="outside", textfont=dict(color="#f0f2f8", size=13),
-        ))
+
+        if is_multi:
+            # Individual policy bars
+            for k in run_policies:
+                r = individual[k]
+                fig_ba.add_trace(go.Bar(
+                    name=f"{POLICIES[k]['icon']} {POLICIES[k]['label']}",
+                    x=["Congestion Level (%)"],
+                    y=[r["modified_score"]],
+                    marker_color=POLICIES[k]["color"],
+                    text=[f"{r['modified_score']:.1f}%"],
+                    textposition="outside", textfont=dict(color="#f0f2f8", size=12),
+                ))
+            # Combined bar
+            fig_ba.add_trace(go.Bar(
+                name="🔗 Combined",
+                x=["Congestion Level (%)"],
+                y=[disp_after],
+                marker_color="#f0c040",
+                text=[f"{disp_after:.1f}%"],
+                textposition="outside", textfont=dict(color="#000", size=12),
+            ))
+        else:
+            r = list(individual.values())[0]
+            fig_ba.add_trace(go.Bar(
+                name=f"{r['policy_icon']} {r['policy_label']}",
+                x=["Congestion Level (%)"],
+                y=[r["modified_score"]],
+                marker_color=r["policy_color"],
+                text=[f"{r['modified_score']:.1f}%"],
+                textposition="outside", textfont=dict(color="#f0f2f8", size=12),
+            ))
+
+        title_str = (f"Current vs {'Combined: ' if is_multi else ''}{disp_label}"
+                     f"<br><sup>{road}, {area}</sup>")
         fig_ba.update_layout(
-            **_CL, barmode="group", height=380, bargap=0.35,
-            title=dict(
-                text=f"<b>Congestion — Current vs After {result['policy_label']}</b><br>"
-                     f"<sup>{road}, {area}</sup>",
-                font=dict(color="#f0f2f8", size=14, family="Syne")),
+            **_CL, barmode="group", height=400, bargap=0.25,
+            title=dict(text=f"<b>Congestion — {title_str}</b>",
+                       font=dict(color="#f0f2f8", size=14, family="Syne")),
         )
-        fig_ba.update_yaxes(title_text="Congestion Level (%)", range=[0, 115])
+        fig_ba.update_yaxes(title_text="Congestion Level (%)", range=[0, 120])
         st.plotly_chart(fig_ba, use_container_width=True, key="chart_ba")
-        render_conclusion("before_after", result, area, road, loc_stats,
-                          f"{cache_key}_{policy_key}_ba")
 
-    # Tab 2 — Volume trend
+        # AI conclusion — use first policy's result for context
+        ref_result = list(individual.values())[0]
+        if is_multi:
+            ref_result = dict(ref_result)
+            ref_result["policy_label"]  = disp_label
+            ref_result["policy_icon"]   = disp_icons
+            ref_result["reduction_pct"] = disp_red
+            ref_result["modified_score"]= disp_after
+            ref_result["speed_gain_pct"]= disp_spd
+        render_conclusion("before_after", ref_result, area, road, loc_stats,
+                          f"{cache_key}_{combo_cache}_ba")
+
+    # ── TAB 2: Volume Trend ───────────────────────────────
     with tab2:
-        st.plotly_chart(
-            chart_trend(result, model, scaler, road),
-            use_container_width=True, key=f"chart_trend_{policy_key}"
-        )
-        render_conclusion("trend", result, area, road, loc_stats,
-                          f"{cache_key}_{policy_key}_trend")
+        if is_multi:
+            # Show trend for each individual policy on same chart
+            fig_tr = go.Figure()
+            volumes = np.linspace(5000, 72000, 50)
+            # Baseline
+            bl_vals = []
+            for vol in volumes:
+                f2 = dict(features); f2["TrafficVolume"] = vol
+                f2["RoadCapacityUtil"] = min(vol / 700, 100)
+                bl_vals.append(predict_congestion(f2, model, scaler))
+            fig_tr.add_trace(go.Scatter(
+                x=list(volumes), y=bl_vals, name="Baseline",
+                mode="lines", line=dict(color="#f87171", width=2.5),
+                fill="tozeroy", fillcolor="rgba(248,113,113,0.05)",
+            ))
+            for k in run_policies:
+                tr_df = simulate_trend(features, k, model, scaler, road)
+                fig_tr.add_trace(go.Scatter(
+                    x=tr_df["TrafficVolume"], y=tr_df["AfterPolicy"],
+                    name=f"{POLICIES[k]['icon']} {POLICIES[k]['label']}",
+                    mode="lines", line=dict(color=POLICIES[k]["color"], width=2, dash="dash"),
+                ))
+            cur_vol = features.get("TrafficVolume", 28000)
+            fig_tr.add_vline(x=cur_vol, line_dash="dot", line_color="#f0c040",
+                             annotation_text=f" Current vol={int(cur_vol):,}",
+                             annotation_font=dict(color="#f0c040", size=10))
+            fig_tr.update_layout(
+                **_CL, height=400,
+                title=dict(text="<b>Congestion vs Volume — All Selected Policies</b>",
+                           font=dict(color="#f0f2f8", size=14, family="Syne")),
+            )
+            fig_tr.update_xaxes(title_text="Traffic Volume (vehicles/day)")
+            fig_tr.update_yaxes(title_text="Congestion Level (%)")
+            st.plotly_chart(fig_tr, use_container_width=True, key="chart_trend_multi")
+        else:
+            r = list(individual.values())[0]
+            st.plotly_chart(
+                chart_trend(r, model, scaler, road),
+                use_container_width=True, key=f"chart_trend_{combo_cache}",
+            )
 
-    # Tab 3 — Feature changes
+        render_conclusion("trend", list(individual.values())[0],
+                          area, road, loc_stats, f"{cache_key}_{combo_cache}_trend")
+
+    # ── TAB 3: Feature Changes ────────────────────────────
     with tab3:
-        st.plotly_chart(
-            chart_feature_impact(result),
-            use_container_width=True, key=f"chart_feat_{policy_key}"
-        )
-        render_conclusion("before_after", result, area, road, loc_stats,
-                          f"{cache_key}_{policy_key}_feat")
+        if is_multi:
+            # Grouped bar: original + each policy
+            feats_show = ["TrafficVolume", "AverageSpeed", "RoadCapacityUtil",
+                          "ParkingUsage", "SignalCompliance", "PublicTransportUsage"]
+            feat_lbls  = ["Traffic Vol", "Avg Speed", "Capacity Util%",
+                          "Parking %", "Signal Comp%", "Public Transp%"]
+            fig_fc = go.Figure()
+            orig_vals = [features.get(f, FEATURE_DEFAULTS.get(f, 0)) for f in feats_show]
+            fig_fc.add_trace(go.Bar(
+                name="Current", x=feat_lbls, y=orig_vals,
+                marker_color="#64748b",
+                text=[f"{v:.0f}" for v in orig_vals],
+                textposition="outside", textfont=dict(color="#8b92a8", size=9),
+            ))
+            for k in run_policies:
+                r = individual[k]
+                mod_vals = [r["modified_features"].get(f, orig_vals[i])
+                            for i, f in enumerate(feats_show)]
+                fig_fc.add_trace(go.Bar(
+                    name=f"{POLICIES[k]['icon']} {POLICIES[k]['label']}",
+                    x=feat_lbls, y=mod_vals,
+                    marker_color=POLICIES[k]["color"],
+                    text=[f"{v:.0f}" for v in mod_vals],
+                    textposition="outside", textfont=dict(color="#f0f2f8", size=9),
+                ))
+            fig_fc.update_layout(
+                **_CL, barmode="group", height=400,
+                title=dict(text="<b>Feature Changes — All Selected Policies</b>",
+                           font=dict(color="#f0f2f8", size=14, family="Syne")),
+            )
+            st.plotly_chart(fig_fc, use_container_width=True, key="chart_feat_multi")
+        else:
+            st.plotly_chart(
+                chart_feature_impact(list(individual.values())[0]),
+                use_container_width=True, key=f"chart_feat_{combo_cache}",
+            )
+        render_conclusion("before_after", list(individual.values())[0],
+                          area, road, loc_stats, f"{cache_key}_{combo_cache}_feat")
 
-    # Tab 4 — Detailed results
+    # ── TAB 4: Detailed Results ───────────────────────────
     with tab4:
-        st.dataframe(pd.DataFrame([{
-            "Policy"          : f"{result['policy_icon']} {result['policy_label']}",
-            "Location"        : f"{road}, {area}",
-            "Road Type"       : road_type_label,
-            "Baseline %"      : result["baseline_score"],
-            "After Policy %"  : result["modified_score"],
-            "Reduction %"     : result["reduction_pct"],
-            "Speed Before"    : result["baseline_speed"],
-            "Speed After"     : result["modified_speed"],
-            "Speed Gain %"    : result["speed_gain_pct"],
-            "TTI Improvement" : result["tti_improvement"],
-            "Cap. Freed %"    : result["cap_freed_pct"],
-            "Effectiveness"   : f"{result['effectiveness']:.0f}%",
-        }]), use_container_width=True, hide_index=True)
+        rows = []
+        for k in run_policies:
+            r = individual[k]
+            rows.append({
+                "Policy"         : f"{r['policy_icon']} {r['policy_label']}",
+                "Baseline %"     : r["baseline_score"],
+                "After Policy %" : r["modified_score"],
+                "Reduction %"    : r["reduction_pct"],
+                "Speed Before"   : r["baseline_speed"],
+                "Speed After"    : r["modified_speed"],
+                "Speed Gain %"   : r["speed_gain_pct"],
+                "TTI Improvement": r["tti_improvement"],
+                "Cap. Freed %"   : r["cap_freed_pct"],
+                "Effectiveness"  : f"{r['effectiveness']:.0f}%",
+            })
+        if is_multi and combined:
+            rows.append({
+                "Policy"         : f"🔗 Combined ({len(run_policies)} policies)",
+                "Baseline %"     : disp_before,
+                "After Policy %" : combined["modified_score"],
+                "Reduction %"    : combined["reduction_pct"],
+                "Speed Before"   : disp_spd_before,
+                "Speed After"    : disp_spd_after,
+                "Speed Gain %"   : combined["speed_gain_pct"],
+                "TTI Improvement": "—",
+                "Cap. Freed %"   : "—",
+                "Effectiveness"  : "—",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        with st.expander("🔍 Feature Values Before / After"):
-            feat_rows = []
-            for feat in FEATURE_COLS:
-                before  = result["inputs"].get(feat, FEATURE_DEFAULTS.get(feat, 0))
-                after_v = result["modified_features"].get(feat, before)
-                delta   = after_v - before
-                feat_rows.append({
-                    "Feature" : feat,
-                    "Before"  : round(before, 3),
-                    "After"   : round(after_v, 3),
-                    "Δ Change": round(delta, 3),
-                })
-            st.dataframe(pd.DataFrame(feat_rows), use_container_width=True, hide_index=True)
+        if is_multi and combined:
+            extra_red = combined["reduction_pct"] - max(
+                individual[k]["reduction_pct"] for k in run_policies)
+            st.markdown(f"""
+            <div class="info-card" style="margin-top:0.8rem;">
+                <b>🔗 Combined Effect:</b> Applying all {len(run_policies)} policies together
+                achieves <b>{combined['reduction_pct']:.1f}%</b> congestion reduction
+                ({'+' if extra_red >= 0 else ''}{extra_red:.1f}% vs the best single policy).
+                Combined strategies target multiple congestion drivers simultaneously but
+                exhibit diminishing returns as their effects overlap.
+            </div>
+            """, unsafe_allow_html=True)
+
+        with st.expander("🔍 Feature Values Before / After (per policy)"):
+            for k in run_policies:
+                r = individual[k]
+                st.markdown(f"**{r['policy_icon']} {r['policy_label']}**")
+                feat_rows = []
+                for feat in FEATURE_COLS:
+                    bv = r["inputs"].get(feat, FEATURE_DEFAULTS.get(feat, 0))
+                    av = r["modified_features"].get(feat, bv)
+                    if round(bv, 2) != round(av, 2):   # only show changed features
+                        feat_rows.append({
+                            "Feature": feat,
+                            "Before" : round(bv, 3),
+                            "After"  : round(av, 3),
+                            "Δ"      : round(av - bv, 3),
+                        })
+                st.dataframe(pd.DataFrame(feat_rows),
+                             use_container_width=True, hide_index=True)
 
 # ═════════════════════════════════════════════════════════
 #  SECTION 05 — WEATHER & HISTORICAL AI ANALYSIS
